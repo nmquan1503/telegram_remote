@@ -50,8 +50,9 @@ def find_terminal():
         [
             "xdotool",
             "search",
-            "--name",
-            TERMINAL_TITLE,
+            "--onlyvisible",
+            "--class",
+            "gnome-terminal",
         ],
         capture_output=True,
         text=True,
@@ -60,9 +61,7 @@ def find_terminal():
     windows = result.stdout.strip().splitlines()
 
     if not windows:
-        raise RuntimeError(
-            f"Terminal '{TERMINAL_TITLE}' not found"
-        )
+        raise RuntimeError("GNOME Terminal not found")
 
     return windows[0]
 
