@@ -16,7 +16,7 @@ from telegram.ext import (
 )
 
 
-load_dotenv()
+load_dotenv(Path(__file__).parent / ".env")
 
 BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 CHAT_ID = int(os.environ["TELEGRAM_CHAT_ID"])
