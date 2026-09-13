@@ -17,6 +17,7 @@ from telegram.ext import (
     MessageHandler,
     filters,
 )
+from telegram.request import HTTPXRequest
 
 
 load_dotenv(
@@ -1103,9 +1104,18 @@ async def run():
 
     start_terminal()
 
+    request = HTTPXRequest(
+        proxy=None,
+        httpx_kwargs={
+            "trust_env": False,
+        }
+    )
+
     application = (
         Application.builder()
         .token(BOT_TOKEN)
+        .request(request)
+        .get_updates_request(request)
         .build()
     )
 

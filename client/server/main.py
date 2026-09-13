@@ -15,6 +15,12 @@ load_dotenv(
     Path(__file__).parent / ".env"
 )
 
+os.environ.pop("HTTP_PROXY", None)
+os.environ.pop("HTTPS_PROXY", None)
+os.environ.pop("ALL_PROXY", None)
+os.environ.pop("http_proxy", None)
+os.environ.pop("https_proxy", None)
+os.environ.pop("all_proxy", None)
 
 API_ID = int(
     os.environ["TELEGRAM_API_ID"]
@@ -47,6 +53,7 @@ telegram_client = TelegramClient(
     "telegram_remote",
     API_ID,
     API_HASH,
+    proxy=None
 )
 
 
