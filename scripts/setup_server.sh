@@ -28,17 +28,4 @@ for var in TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID; do
     fi
 done
 
-echo "==> Checking system dependencies..."
-
-if ! command -v xdotool >/dev/null 2>&1; then
-    echo "ERROR: xdotool is not installed"
-    echo "Run: sudo apt install xdotool"
-    exit 1
-fi
-
-if ! command -v gnome-terminal >/dev/null 2>&1; then
-    echo "ERROR: gnome-terminal is not installed"
-    exit 1
-fi
-
 echo "==> Setup completed."

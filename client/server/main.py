@@ -1,20 +1,47 @@
+import asyncio
+import base64
 import json
+import logging
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
-
 from dotenv import load_dotenv
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
 from telethon import TelegramClient, events
 
 
-load_dotenv(Path(__file__).parent / ".env")
+load_dotenv(
+    Path(__file__).parent / ".env"
+)
 
-API_ID = int(os.environ["TELEGRAM_API_ID"])
-API_HASH = os.environ["TELEGRAM_API_HASH"]
-BOT_USERNAME = os.environ["TELEGRAM_BOT_USERNAME"]
+
+API_ID = int(
+    os.environ["TELEGRAM_API_ID"]
+)
+
+API_HASH = os.environ[
+    "TELEGRAM_API_HASH"
+]
+
+BOT_USERNAME = os.environ[
+    "TELEGRAM_BOT_USERNAME"
+]
+
+
+logging.basicConfig(
+    level=logging.INFO,
+    format=(
+        "%(asctime)s | "
+        "%(levelname)s | "
+        "%(message)s"
+    ),
+)
+
+logger = logging.getLogger(
+    "telegram_remote_client"
+)
+
 
 telegram_client = TelegramClient(
     "telegram_remote",
@@ -22,108 +49,481 @@ telegram_client = TelegramClient(
     API_HASH,
 )
 
+
 websocket_clients: set[WebSocket] = set()
 
-active_command = None
-active_log = None
+telegram_queue: asyncio.Queue | None = None
+
+telegram_sender_task: asyncio.Task | None = None
+
+input_sender_task: asyncio.Task | None = None
+
+INPUT_BATCH_INTERVAL = 0.05
+
+TELEGRAM_MIN_INTERVAL = 1.1
+
+input_buffer = bytearray()
+
+input_lock = asyncio.Lock()
+
+input_event = asyncio.Event()
+
+current_mode = "command"
+
+current_status = "initializing"
+
+restoring = False
+
+restore_cutoff_id = 0
+
+pending_live_messages = []
+
+restored_data = []
 
 
-async def recover_state():
-    global active_command, active_log
-
-    messages = await telegram_client.get_messages(
-        BOT_USERNAME,
-        limit=100,
-    )
-
-    command_message = None
-
-    for message in messages:
-        if not message.out:
-            continue
-
-        text = message.raw_text.strip()
-
-        if text.startswith("/command "):
-            command_message = message
-            break
-
-    if command_message is None:
+async def broadcast(data):
+    if not websocket_clients:
         return
 
-    command = command_message.raw_text[len("/command "):].strip()
+    message = json.dumps(data)
 
-    newer_messages = [
-        message
-        for message in messages
-        if message.id > command_message.id
-    ]
+    dead_clients = []
 
-    if any(
-        message.raw_text.rstrip().endswith("/end")
-        for message in newer_messages
+    for websocket in list(
+        websocket_clients
     ):
-        return
-
-    bot_messages = [
-        message
-        for message in newer_messages
-        if not message.out
-    ]
-
-    active_command = command
-
-    if bot_messages:
-        active_log = bot_messages[-1].raw_text
-    else:
-        active_log = ""
-
-
-@telegram_client.on(events.NewMessage(chats=BOT_USERNAME))
-async def handle_telegram_message(event):
-    global active_log
-
-    message = event.raw_text
-
-    if message.rstrip().endswith("/end"):
-        active_log = message[:-4].rstrip()
-
-        for websocket in list(websocket_clients):
-            try:
-                await websocket.send_text(
-                    json.dumps({
-                        "type": "end",
-                        "log": active_log,
-                    })
-                )
-            except Exception:
-                websocket_clients.discard(websocket)
-
-        active_log = None
-        return
-
-    active_log = message
-
-    for websocket in list(websocket_clients):
         try:
             await websocket.send_text(
-                json.dumps({
-                    "type": "log",
-                    "log": message,
-                })
+                message
             )
         except Exception:
-            websocket_clients.discard(websocket)
+            logger.exception(
+                "WebSocket send error."
+            )
+            dead_clients.append(
+                websocket
+            )
+
+    for websocket in dead_clients:
+        websocket_clients.discard(
+            websocket
+        )
+
+
+async def send_control(command: str):
+    logger.info(
+        "Control -> Telegram: %s",
+        command,
+    )
+
+    await telegram_client.send_message(
+        BOT_USERNAME,
+        command,
+    )
+
+
+async def telegram_sender():
+    logger.info(
+        "Telegram sender started."
+    )
+
+    last_send_time = 0.0
+
+    while True:
+        message = await telegram_queue.get()
+
+        try:
+            now = (
+                asyncio
+                .get_running_loop()
+                .time()
+            )
+
+            if last_send_time != 0.0:
+                elapsed = (
+                    now - last_send_time
+                )
+
+                if (
+                    elapsed
+                    < TELEGRAM_MIN_INTERVAL
+                ):
+                    await asyncio.sleep(
+                        TELEGRAM_MIN_INTERVAL
+                        - elapsed
+                    )
+
+            logger.info(
+                "Telegram -> %s",
+                message[:100],
+            )
+
+            await telegram_client.send_message(
+                BOT_USERNAME,
+                message,
+            )
+
+            last_send_time = (
+                asyncio
+                .get_running_loop()
+                .time()
+            )
+
+        except asyncio.CancelledError:
+            raise
+
+        except Exception:
+            logger.exception(
+                "Telegram send error."
+            )
+
+            await asyncio.sleep(
+                2.0
+            )
+
+        finally:
+            telegram_queue.task_done()
+
+
+async def queue_input(data: bytes):
+    async with input_lock:
+        input_buffer.extend(data)
+
+    input_event.set()
+
+
+async def input_sender():
+    logger.info(
+        "Input sender started."
+    )
+
+    while True:
+        await input_event.wait()
+
+        await asyncio.sleep(
+            INPUT_BATCH_INTERVAL
+        )
+
+        async with input_lock:
+            if not input_buffer:
+                input_event.clear()
+                continue
+
+            data = bytes(
+                input_buffer
+            )
+
+            input_buffer.clear()
+
+            input_event.clear()
+
+        encoded = (
+            base64.b64encode(
+                data
+            ).decode("ascii")
+        )
+
+        message = (
+            f"/input {encoded}"
+        )
+
+        logger.info(
+            "Input -> Telegram: %d bytes",
+            len(data),
+        )
+
+        await telegram_queue.put(
+            message
+        )
+
+
+async def process_telegram_message(
+    message,
+):
+    global current_mode
+    global current_status
+
+    text = message.raw_text or ""
+
+    logger.info(
+        "Telegram <- %s",
+        text[:100],
+    )
+
+    if text.startswith("/data "):
+        data = text[
+            len("/data "):
+        ]
+
+        if restoring:
+            restored_data.append(
+                data
+            )
+        else:
+            raw_data = (
+                base64.b64decode(
+                    data
+                )
+            )
+
+            if not raw_data:
+                return
+
+            await broadcast({
+                "type": "data",
+                "data": (
+                    base64.b64encode(
+                        raw_data
+                    ).decode("ascii")
+                ),
+            })
+
+        return
+
+    if text.startswith("/mode "):
+        mode = text[
+            len("/mode "):
+        ].strip()
+
+        if mode not in {
+            "command",
+            "raw",
+        }:
+            return
+
+        current_mode = mode
+
+        if not restoring:
+            await broadcast({
+                "type": "mode",
+                "mode": mode,
+            })
+
+        return
+
+    if text == "/ready":
+        current_status = "ready"
+
+        if not restoring:
+            await broadcast({
+                "type": "status",
+                "status": "ready",
+            })
+
+        return
+
+    if text == "/closed":
+        current_status = "closed"
+
+        if not restoring:
+            await broadcast({
+                "type": "status",
+                "status": "closed",
+            })
+
+        return
+
+
+async def restore_session():
+    global restoring
+    global restore_cutoff_id
+    global pending_live_messages
+
+    logger.info(
+        "Restoring Telegram session..."
+    )
+
+    latest = (
+        await telegram_client.get_messages(
+            BOT_USERNAME,
+            limit=1,
+        )
+    )
+
+    if latest:
+        restore_cutoff_id = (
+            latest[0].id
+        )
+    else:
+        restore_cutoff_id = 0
+
+    messages = []
+
+    async for message in (
+        telegram_client.iter_messages(
+            BOT_USERNAME,
+        )
+    ):
+        if message.id > restore_cutoff_id:
+            continue
+
+        if message.out:
+            continue
+
+        text = (
+            message.raw_text or ""
+        )
+
+        if text == "/session":
+            break
+
+        messages.append(message)
+
+    messages.reverse()
+
+    restored_data.clear()
+
+    logger.info(
+        "Replaying %d Telegram message(s)",
+        len(messages),
+    )
+
+    for message in messages:
+        await process_telegram_message(
+            message
+        )
+
+    buffered = sorted(
+        pending_live_messages,
+        key=lambda message: message.id,
+    )
+
+    pending_live_messages.clear()
+
+    for message in buffered:
+        if message.id <= restore_cutoff_id:
+            continue
+
+        await process_telegram_message(
+            message
+        )
+
+    restoring = False
+
+    logger.info(
+        "Session restored: "
+        "status=%s mode=%s data_chunks=%d",
+        current_status,
+        current_mode,
+        len(restored_data),
+    )
+
+
+@telegram_client.on(
+    events.NewMessage(
+        chats=BOT_USERNAME,
+        incoming=True,
+    )
+)
+async def handle_telegram_message(
+    event,
+):
+    message = event.message
+
+    if restoring:
+        pending_live_messages.append(
+            message
+        )
+        return
+
+    if message.id <= restore_cutoff_id:
+        return
+
+    await process_telegram_message(
+        message
+    )
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
+async def lifespan(app):
+    global telegram_queue
+    global telegram_sender_task
+    global input_sender_task
+    global restoring
+
+    telegram_queue = asyncio.Queue()
+
+    restoring = True
+
+    logger.info(
+        "Starting Telegram client..."
+    )
+
     await telegram_client.start()
-    await recover_state()
 
-    yield
+    logger.info(
+        "Telegram client started."
+    )
 
-    await telegram_client.disconnect()
+    await send_control(
+        "/active"
+    )
+
+    logger.info(
+        "Polling -> ACTIVE"
+    )
+
+    await restore_session()
+
+    telegram_sender_task = (
+        asyncio.create_task(
+            telegram_sender()
+        )
+    )
+
+    input_sender_task = (
+        asyncio.create_task(
+            input_sender()
+        )
+    )
+
+    logger.info(
+        "Background tasks started."
+    )
+
+    try:
+        yield
+
+    finally:
+        logger.info(
+            "Stopping Telegram client..."
+        )
+
+        try:
+            await send_control(
+                "/idle"
+            )
+
+            logger.info(
+                "Polling -> IDLE"
+            )
+
+        except Exception:
+            logger.exception(
+                "Failed to send /idle."
+            )
+
+        tasks = []
+
+        for task in (
+            telegram_sender_task,
+            input_sender_task,
+        ):
+            if task is not None:
+                task.cancel()
+                tasks.append(task)
+
+        if tasks:
+            await asyncio.gather(
+                *tasks,
+                return_exceptions=True,
+            )
+
+        await telegram_client.disconnect()
+
+        logger.info(
+            "Telegram client stopped."
+        )
 
 
 app = FastAPI(
@@ -131,64 +531,135 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost:5173",
         "http://127.0.0.1:5173",
     ],
-    allow_methods=["POST"],
-    allow_headers=["Content-Type"],
+    allow_methods=[
+        "GET",
+        "POST",
+    ],
+    allow_headers=[
+        "*",
+    ],
 )
 
 
-class CommandRequest(BaseModel):
-    command: str
+@app.websocket("/ws")
+async def websocket_endpoint(
+    websocket: WebSocket,
+):
+    await websocket.accept()
 
-
-@app.post("/command")
-async def send_command(request: CommandRequest):
-    global active_command, active_log
-
-    command = request.command.strip()
-
-    if not command:
-        return {
-            "ok": False,
-            "error": "Command is empty",
-        }
-
-    active_command = command
-    active_log = ""
-
-    await telegram_client.send_message(
-        BOT_USERNAME,
-        f"/command {command}",
+    websocket_clients.add(
+        websocket
     )
 
-    return {"ok": True}
+    logger.info(
+        "WebSocket connected. Clients=%d",
+        len(websocket_clients),
+    )
 
+    await websocket.send_text(
+        json.dumps({
+            "type": "status",
+            "status": current_status,
+        })
+    )
 
-@app.websocket("/ws")
-async def websocket_endpoint(websocket: WebSocket):
-    await websocket.accept()
-    websocket_clients.add(websocket)
+    await websocket.send_text(
+        json.dumps({
+            "type": "mode",
+            "mode": current_mode,
+        })
+    )
 
-    if active_command is not None:
+    for data in restored_data:
         await websocket.send_text(
             json.dumps({
-                "type": "state",
-                "command": active_command,
-                "log": active_log or "",
+                "type": "data",
+                "data": data,
             })
         )
 
     try:
         while True:
-            await websocket.receive_text()
+            message = (
+                await websocket.receive_text()
+            )
+
+            try:
+                payload = json.loads(
+                    message
+                )
+
+            except Exception:
+                logger.exception(
+                    "Invalid WebSocket JSON."
+                )
+                continue
+
+            if payload.get(
+                "type"
+            ) != "input":
+                logger.warning(
+                    "Unknown WebSocket message: %s",
+                    payload,
+                )
+                continue
+
+            encoded = payload.get(
+                "data"
+            )
+
+            if not encoded:
+                continue
+
+            try:
+                data = (
+                    base64.b64decode(
+                        encoded,
+                        validate=True,
+                    )
+                )
+
+            except Exception:
+                logger.exception(
+                    "Invalid input Base64."
+                )
+                continue
+
+            if not data:
+                continue
+
+            logger.info(
+                "WebSocket -> input: %r",
+                data,
+            )
+
+            await queue_input(
+                data
+            )
 
     except WebSocketDisconnect:
-        pass
+        logger.info(
+            "WebSocket disconnected."
+        )
+
+    except Exception:
+        logger.exception(
+            "WebSocket error."
+        )
 
     finally:
-        websocket_clients.discard(websocket)
+        websocket_clients.discard(
+            websocket
+        )
+
+        logger.info(
+            "WebSocket removed. Clients=%d",
+            len(websocket_clients),
+        )

@@ -1,52 +1,138 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Telegram Remote Terminal</title>
-    <link rel="stylesheet" href="/style.css">
+
+    <meta
+        name="viewport"
+        content="width=device-width, initial-scale=1.0"
+    >
+
+    <title>Telegram Remote</title>
+
+    <link
+        rel="stylesheet"
+        href="https://cdn.jsdelivr.net/npm/xterm/css/xterm.css"
+    >
+
+    <link
+        rel="stylesheet"
+        href="/style.css"
+    >
 </head>
 
 <body>
-    <div class="terminal">
-        <div class="titlebar">
-            <div class="dots">
-                <div class="dot"></div>
-                <div class="dot"></div>
-                <div class="dot"></div>
+
+    <main class="app">
+
+        <header class="titlebar">
+
+            <div class="window-controls">
+                <span class="control close"></span>
+                <span class="control minimize"></span>
+                <span class="control maximize"></span>
             </div>
 
-            <div class="title">
-                telegram-remote
-            </div>
-        </div>
-
-        <div class="body" id="terminal">
-            <div class="line output">
-                Telegram Remote Terminal
+            <div class="window-title">
+                <span class="terminal-icon">›_</span>
+                <span>telegram-remote</span>
             </div>
 
-            <div class="line output">
-                Ready.
+            <div class="connection">
+                <span
+                    id="connection-dot"
+                    class="connection-dot"
+                ></span>
+
+                <span id="connection-status">
+                    CONNECTING
+                </span>
             </div>
 
-            <br>
+        </header>
 
-            <div class="input-line">
-                <span class="prompt">$</span>
+        <section class="terminal-shell">
 
-                <input
-                    id="input"
-                    class="input"
-                    type="text"
-                    autocomplete="off"
-                    autofocus
-                    spellcheck="false"
-                >
+            <div
+                id="startup"
+                class="startup"
+            >
+                <div class="startup-logo">
+                    ›_
+                </div>
+
+                <div class="startup-title">
+                    Telegram Remote Terminal
+                </div>
+
+                <div class="startup-subtitle">
+                    Connecting to remote shell...
+                </div>
+
+                <div class="startup-status">
+                    <span class="loader"></span>
+
+                    <span id="startup-status">
+                        Establishing connection
+                    </span>
+                </div>
             </div>
-        </div>
-    </div>
+
+            <div
+                id="terminal"
+                class="terminal"
+            ></div>
+
+        </section>
+
+        <footer class="statusbar">
+
+            <div class="status-left">
+
+                <span class="status-item">
+                    <span class="status-label">
+                        MODE
+                    </span>
+
+                    <span
+                        id="mode"
+                        class="mode command"
+                    >
+                        COMMAND
+                    </span>
+                </span>
+
+                <span class="separator"></span>
+
+                <span class="status-item">
+                    <span class="status-label">
+                        SHELL
+                    </span>
+
+                    <span class="status-value">
+                        bash
+                    </span>
+                </span>
+
+            </div>
+
+            <div class="status-right">
+                <span id="status-message">
+                    Initializing...
+                </span>
+            </div>
+
+        </footer>
+
+    </main>
+
+    <script
+        src="https://cdn.jsdelivr.net/npm/xterm/lib/xterm.js"
+    ></script>
 
     <script src="/main.js"></script>
+
 </body>
+
 </html>

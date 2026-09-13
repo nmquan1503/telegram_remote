@@ -35,7 +35,7 @@ import os
 from dotenv import load_dotenv
 from telethon import TelegramClient
 
-load_dotenv()
+load_dotenv(".env")
 
 client = TelegramClient(
     "telegram_remote",
